@@ -1,0 +1,20 @@
+[package]
+name = "mindmap"
+version = "1.0.0"
+edition = "2021"
+description = "A portable mind-mapping canvas for Linux"
+readme = "README.md"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
