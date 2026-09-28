@@ -1,0 +1,5 @@
+/target
+/dist
+/mindmap-data
+**/*.tmp
+**/*.json.tmp
