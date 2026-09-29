@@ -3,6 +3,8 @@ impl MindMapApp {
         let mut create = false;
         let mut open: Option<NodeId> = None;
         let mut review = false;
+        let mut tasks = false;
+        let mut constraints = false;
         let roots: Vec<(NodeId, String, Staleness)> = self
             .library
             .roots()
@@ -28,6 +30,10 @@ impl MindMapApp {
         let status = self.status.clone();
         let data_dir = self.data_dir.display().to_string();
         let review_open = matches!(self.screen, Screen::Review);
+        let tasks_open = matches!(self.screen, Screen::Tasks);
+        let constraints_open = matches!(self.screen, Screen::Constraints);
+        let task_count = self.library.task_lists().len();
+        let constraint_count = self.library.constraint_lists().len();
 
         egui::SidePanel::left("nav")
             .exact_width(276.0)
@@ -59,7 +65,7 @@ impl MindMapApp {
                 ui.add_space(14.0);
                 ui.label(RichText::new("CANVASES").size(11.0).color(CREAM_DIM));
                 ui.add_space(4.0);
-                let footer = 248.0;
+                let footer = 360.0;
                 let list_h = (ui.available_height() - footer).max(72.0);
                 ScrollArea::vertical()
                     .max_height(list_h)
@@ -93,10 +99,40 @@ impl MindMapApp {
                         review = true;
                     }
                 });
+                ui.add_space(6.0);
+                let task_label = if task_count == 0 {
+                    "Tasks".to_string()
+                } else {
+                    format!("Tasks  ·  {task_count}")
+                };
+                let task_button = Button::new(RichText::new(task_label).color(CREAM).size(14.0))
+                    .fill(if tasks_open { SIDEBAR_SELECTED } else { SIDEBAR_RAISED })
+                    .min_size(vec2(ui.available_width(), 36.0));
+                if ui.add(task_button).clicked() {
+                    tasks = true;
+                }
+                ui.add_space(6.0);
+                let constraint_label = if constraint_count == 0 {
+                    "Constraints".to_string()
+                } else {
+                    format!("Constraints  ·  {constraint_count}")
+                };
+                let constraint_button =
+                    Button::new(RichText::new(constraint_label).color(CREAM).size(14.0))
+                        .fill(if constraints_open {
+                            SIDEBAR_SELECTED
+                        } else {
+                            SIDEBAR_RAISED
+                        })
+                        .min_size(vec2(ui.available_width(), 36.0));
+                if ui.add(constraint_button).clicked() {
+                    constraints = true;
+                }
                 ui.add_space(12.0);
                 for line in [
                     "Ctrl+click    add a branch",
                     "Ctrl+drag     connect rectangles",
+                    "Click a line  tasks, constraints",
                     "Shift+click   nested map",
                     "Double-click  edit",
                     "Arrows        pan",
@@ -124,6 +160,10 @@ impl MindMapApp {
             self.open_root(id);
         } else if review {
             self.open_review();
+        } else if tasks {
+            self.open_tasks();
+        } else if constraints {
+            self.open_constraints();
         }
     }
 
@@ -286,6 +326,7 @@ impl MindMapApp {
                 self.paint(ui, &layout, canvas_rect, &canvas_id);
                 self.editor(ctx, &layout, canvas_rect);
                 self.inspector(ctx, &canvas_id);
+                self.line_panel(ctx, &canvas_id);
             });
         let _ = navigated;
     }
@@ -300,7 +341,7 @@ impl MindMapApp {
         } else if shift {
             "Shift+click an idea to open a map with that wording in the centre."
         } else {
-            "Ctrl+click adds a branch. Ctrl+drag connects two rectangles. Shift+click opens a nested map. Double-click edits."
+            "Ctrl+click adds a branch. Ctrl+drag connects two rectangles. Click a line for tasks and constraints."
         }
     }
 
@@ -398,22 +439,51 @@ impl MindMapApp {
             return;
         };
         let ctx = ui.ctx().clone();
+        let today = Local::now().date_naive();
+        let selected_edge = match &self.selected {
+            Some(Selection::Edge(id)) => Some(id.as_str()),
+            _ => None,
+        };
         for route in &layout.routes {
+            let edge = canvas.edges.iter().find(|edge| edge.id == route.id);
             let closed = canvas.effectively_closed(&route.from) || canvas.effectively_closed(&route.to);
-            let color = if closed {
+            let heat = edge.and_then(|edge| edge.heat(today));
+            let selected = selected_edge == Some(route.id.as_str());
+            let color = if let Some(heat) = heat {
+                let base = heat_color(heat);
+                if closed {
+                    Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 150)
+                } else {
+                    base
+                }
+            } else if closed {
                 Color32::from_rgba_unmultiplied(120, 110, 98, 90)
             } else if route.kind == EdgeKind::Link {
                 Color32::from_rgba_unmultiplied(92, 78, 64, 160)
             } else {
                 LINE
             };
-            let width = if route.kind == EdgeKind::Link { 1.35 } else { 1.8 };
+            let width = if selected {
+                3.2
+            } else if heat.is_some() {
+                2.5
+            } else if route.kind == EdgeKind::Link {
+                1.35
+            } else {
+                1.8
+            };
             let points: Vec<Pos2> = route
                 .points
                 .iter()
                 .map(|point| self.camera.world_to_screen(*point, viewport))
                 .collect();
             if points.len() >= 2 {
+                if selected {
+                    painter.add(egui::Shape::line(
+                        points.clone(),
+                        Stroke::new(width + 3.0, Color32::from_rgba_unmultiplied(184, 84, 42, 70)),
+                    ));
+                }
                 painter.add(egui::Shape::line(points, Stroke::new(width, color)));
             }
         }
@@ -442,6 +512,21 @@ impl MindMapApp {
         for node in circle_first.into_iter().chain(rects) {
             self.paint_node(&painter, &ctx, canvas, node, viewport);
         }
+        for route in &layout.routes {
+            let Some(edge) = canvas.edges.iter().find(|edge| edge.id == route.id) else {
+                continue;
+            };
+            let ratio = edge.open_task_ratio();
+            let free = edge.free_percent();
+            if ratio.is_none() && free.is_none() {
+                continue;
+            }
+            let Some(mid) = polyline_midpoint(&route.points) else {
+                continue;
+            };
+            let screen = self.camera.world_to_screen(mid, viewport);
+            paint_line_badges(&painter, &ctx, screen, ratio, free, self.camera.zoom);
+        }
         if canvas.nodes.len() == 1 {
             if let Some(circle) = layout.nodes.iter().find(|node| node.shape == NodeShape::Circle) {
                 let pos = self.camera.world_to_screen(
@@ -468,7 +553,7 @@ impl MindMapApp {
         viewport: Rect,
     ) {
         let rect = node_screen_rect(&self.camera, node, viewport);
-        let selected = self.selected.as_deref() == Some(node.id.as_str());
+        let selected = matches!(&self.selected, Some(Selection::Node(id)) if id == &node.id);
         let hovered = self.hover.as_deref() == Some(node.id.as_str());
         let model = canvas.node(&node.id);
         let text = model.map(|item| item.text.as_str()).unwrap_or("");
@@ -612,7 +697,7 @@ impl MindMapApp {
         if self.editing.is_some() {
             return;
         }
-        let Some(node_id) = self.selected.clone() else {
+        let Some(Selection::Node(node_id)) = self.selected.clone() else {
             return;
         };
         let Some(canvas) = self.library.canvas(canvas_id) else {
@@ -717,5 +802,544 @@ impl MindMapApp {
             None => {}
         }
     }
+
+    fn line_panel(&mut self, ctx: &egui::Context, canvas_id: &str) {
+        if self.editing.is_some() {
+            return;
+        }
+        let Some(Selection::Edge(edge_id)) = self.selected.clone() else {
+            self.line_panel_rect = None;
+            return;
+        };
+        let Some(edge) = self
+            .library
+            .canvas(canvas_id)
+            .and_then(|canvas| canvas.edges.iter().find(|edge| edge.id == edge_id).cloned())
+        else {
+            self.line_panel_rect = None;
+            return;
+        };
+        let (from_text, to_text) = self
+            .library
+            .canvas(canvas_id)
+            .map(|canvas| {
+                (
+                    label_for(
+                        &canvas
+                            .node(&edge.from)
+                            .map(|node| node.text.clone())
+                            .unwrap_or_default(),
+                    ),
+                    label_for(
+                        &canvas
+                            .node(&edge.to)
+                            .map(|node| node.text.clone())
+                            .unwrap_or_default(),
+                    ),
+                )
+            })
+            .unwrap_or_else(|| ("Line".into(), "Line".into()));
+        let closed = self.library.edge_closed(canvas_id, &edge_id);
+        let canvas_id = canvas_id.to_string();
+        let edge_id = edge_id.clone();
+        let mut draft = self.deadline_draft.clone();
+        let mut edits = Vec::new();
+
+        let area = egui::Area::new(Id::new("line-inspector"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                Frame::popup(ui.style())
+                    .fill(CARD)
+                    .rounding(Rounding::same(16.0))
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .inner_margin(Margin::same(16.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(760.0);
+                        ui.set_max_width(860.0);
+                        ui.label(
+                            RichText::new(format!("{from_text}  ->  {to_text}"))
+                                .strong()
+                                .size(18.0)
+                                .color(INK),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Tasks sit on the left. Constraints sit on the right. A deadline within 3 days turns the line red, within a week orange, and within 3 weeks yellow.",
+                            )
+                            .size(12.0)
+                            .color(MUTED),
+                        );
+                        if closed {
+                            ui.label(
+                                RichText::new("This line is closed, so it can be read but not edited.")
+                                    .size(12.0)
+                                    .color(MUTED)
+                                    .italics(),
+                            );
+                        }
+                        ui.add_space(8.0);
+                        ui.columns(2, |columns| {
+                            columns[0].label(RichText::new("Task list").strong().color(INK));
+                            ScrollArea::vertical()
+                                .id_salt("line-tasks")
+                                .max_height(280.0)
+                                .show(&mut columns[0], |ui| {
+                                    if edge.tasks.is_empty() {
+                                        ui.label(RichText::new("No tasks yet").color(MUTED).italics());
+                                    }
+                                    for task in &edge.tasks {
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            let mut done = task.done;
+                                            if closed {
+                                                ui.label(if done { "✓" } else { "○" });
+                                            } else if ui.add(Checkbox::new(&mut done, "")).changed() {
+                                                edits.push(LineEdit::TaskDone(task.id.clone(), done));
+                                            }
+                                            if closed {
+                                                ui.label(RichText::new(label_for(&task.text)).color(INK));
+                                            } else {
+                                                let mut text = task.text.clone();
+                                                let response = ui.add(
+                                                    TextEdit::singleline(&mut text)
+                                                        .hint_text("Task")
+                                                        .desired_width(210.0),
+                                                );
+                                                if response.changed() {
+                                                    edits.push(LineEdit::TaskText(task.id.clone(), text));
+                                                }
+                                            }
+                                            if !closed && ui.small_button("Remove").clicked() {
+                                                edits.push(LineEdit::RemoveTask(task.id.clone()));
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(28.0);
+                                            ui.label(RichText::new("Deadline").size(12.0).color(MUTED));
+                                            if closed {
+                                                let due = task
+                                                    .deadline
+                                                    .map(|date| date.format("%Y-%m-%d").to_string())
+                                                    .unwrap_or_else(|| "none".to_string());
+                                                ui.label(due);
+                                            } else {
+                                                let mut text = if draft
+                                                    .as_ref()
+                                                    .is_some_and(|(id, _)| id == &task.id)
+                                                {
+                                                    draft.as_ref().map(|(_, text)| text.clone()).unwrap_or_default()
+                                                } else {
+                                                    task.deadline
+                                                        .map(|date| date.format("%Y-%m-%d").to_string())
+                                                        .unwrap_or_default()
+                                                };
+                                                let response = ui.add(
+                                                    TextEdit::singleline(&mut text)
+                                                        .hint_text("optional, YYYY-MM-DD")
+                                                        .desired_width(150.0),
+                                                );
+                                                if response.changed() {
+                                                    draft = Some((task.id.clone(), text.clone()));
+                                                    if text.trim().is_empty() {
+                                                        edits.push(LineEdit::TaskDeadline(task.id.clone(), None));
+                                                    } else if let Some(date) = parse_deadline(&text) {
+                                                        edits.push(LineEdit::TaskDeadline(
+                                                            task.id.clone(),
+                                                            Some(date),
+                                                        ));
+                                                    }
+                                                }
+                                                if response.lost_focus()
+                                                    && !text.trim().is_empty()
+                                                    && parse_deadline(&text).is_none()
+                                                {
+                                                    draft = None;
+                                                }
+                                            }
+                                            if let Some(date) = task.deadline {
+                                                if !task.done {
+                                                    if let Some(heat) = deadline_heat(date, Local::now().date_naive())
+                                                    {
+                                                        let (rect, _) = ui.allocate_exact_size(
+                                                            vec2(12.0, 16.0),
+                                                            Sense::hover(),
+                                                        );
+                                                        ui.painter().circle_filled(
+                                                            rect.center(),
+                                                            5.0,
+                                                            heat_color(heat),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            if !closed && columns[0].button("Add task").clicked() {
+                                edits.push(LineEdit::AddTask);
+                            }
+
+                            columns[1].label(RichText::new("Constraints").strong().color(INK));
+                            ScrollArea::vertical()
+                                .id_salt("line-constraints")
+                                .max_height(220.0)
+                                .show(&mut columns[1], |ui| {
+                                    if edge.constraints.is_empty() {
+                                        ui.label(
+                                            RichText::new("No constraints yet").color(MUTED).italics(),
+                                        );
+                                    }
+                                    for constraint in &edge.constraints {
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            if closed {
+                                                ui.label(RichText::new(label_for(&constraint.text)).color(INK));
+                                            } else {
+                                                let mut text = constraint.text.clone();
+                                                let response = ui.add(
+                                                    TextEdit::singleline(&mut text)
+                                                        .hint_text("Constraint")
+                                                        .desired_width(250.0),
+                                                );
+                                                if response.changed() {
+                                                    edits.push(LineEdit::ConstraintText(
+                                                        constraint.id.clone(),
+                                                        text,
+                                                    ));
+                                                }
+                                            }
+                                            if !closed && ui.small_button("Remove").clicked() {
+                                                edits.push(LineEdit::RemoveConstraint(constraint.id.clone()));
+                                            }
+                                        });
+                                    }
+                                });
+                            if !closed && columns[1].button("Add constraint").clicked() {
+                                edits.push(LineEdit::AddConstraint);
+                            }
+                            if !edge.constraints.is_empty() {
+                                columns[1].add_space(8.0);
+                                columns[1].label(
+                                    RichText::new("Approx. percent constrained")
+                                        .size(12.0)
+                                        .color(MUTED),
+                                );
+                                if closed {
+                                    match edge.constrained_percent {
+                                        Some(percent) => {
+                                            columns[1].label(format!(
+                                                "{percent}% constrained · {}% still free",
+                                                100 - percent.min(100)
+                                            ));
+                                        }
+                                        None => {
+                                            columns[1].label(
+                                                RichText::new("Not set").italics().color(MUTED),
+                                            );
+                                        }
+                                    }
+                                } else if let Some(percent) = edge.constrained_percent {
+                                    let mut value = percent as f32;
+                                    let response = columns[1].add(
+                                        Slider::new(&mut value, 0.0..=100.0)
+                                            .integer()
+                                            .suffix("%"),
+                                    );
+                                    if response.changed() {
+                                        edits.push(LineEdit::Percent(Some(value.round() as u8)));
+                                    }
+                                    columns[1].label(
+                                        RichText::new(format!(
+                                            "The line shows {}% still free.",
+                                            100 - (value.round() as u8).min(100)
+                                        ))
+                                        .size(12.0)
+                                        .color(MUTED),
+                                    );
+                                    if columns[1].small_button("Clear percent").clicked() {
+                                        edits.push(LineEdit::Percent(None));
+                                    }
+                                } else if columns[1].button("Add percent constrained").clicked() {
+                                    edits.push(LineEdit::Percent(Some(0)));
+                                }
+                            }
+                        });
+                    });
+            });
+        self.line_panel_rect = Some(area.response.rect.expand(8.0));
+
+        self.deadline_draft = draft;
+        for edit in edits {
+            match edit {
+                LineEdit::AddTask => {
+                    let canvas_id = canvas_id.clone();
+                    let edge_id = edge_id.clone();
+                    self.change_line_once(move |library| {
+                        library.add_task(&canvas_id, &edge_id, Utc::now()).is_some()
+                    });
+                }
+                LineEdit::TaskText(task_id, text) => {
+                    let canvas_id = canvas_id.clone();
+                    let edge_id = edge_id.clone();
+                    let key = format!("task-text-{task_id}");
+                    self.change_line(&key, move |library| {
+                        library.set_task_text(&canvas_id, &edge_id, &task_id, text, Utc::now())
+                    });
+                }
+                LineEdit::TaskDone(task_id, done) => {
+                    let canvas_id = canvas_id.clone();
+                    let edge_id = edge_id.clone();
+                    self.change_line_once(move |library| {
+                        library.set_task_done(&canvas_id, &edge_id, &task_id, done, Utc::now())
+                    });
+                }
+                LineEdit::TaskDeadline(task_id, deadline) => {
+                    let canvas_id = canvas_id.clone();
+                    let edge_id = edge_id.clone();
+                    let key = format!("task-deadline-{task_id}");
+                    self.change_line(&key, move |library| {
+                        library.set_task_deadline(
+                            &canvas_id,
+                            &edge_id,
+                            &task_id,
+                            deadline,
+                            Utc::now(),
+                        )
+                    });
+                }
+                LineEdit::RemoveTask(task_id) => {
+                    let canvas_id = canvas_id.clone();
+                    let edge_id = edge_id.clone();
+                    self.change_line_once(move |library| {
+                        library.remove_task(&canvas_id, &edge_id, &task_id, Utc::now())
+                    });
+                    self.deadline_draft = None;
+                }
+                LineEdit::AddConstraint => {
+                    let canvas_id = canvas_id.clone();
+                    let edge_id = edge_id.clone();
+                    self.change_line_once(move |library| {
+                        library
+                            .add_constraint(&canvas_id, &edge_id, Utc::now())
+                            .is_some()
+                    });
+                }
+                LineEdit::ConstraintText(constraint_id, text) => {
+                    let canvas_id = canvas_id.clone();
+                    let edge_id = edge_id.clone();
+                    let key = format!("constraint-text-{constraint_id}");
+                    self.change_line(&key, move |library| {
+                        library.set_constraint_text(
+                            &canvas_id,
+                            &edge_id,
+                            &constraint_id,
+                            text,
+                            Utc::now(),
+                        )
+                    });
+                }
+                LineEdit::RemoveConstraint(constraint_id) => {
+                    let canvas_id = canvas_id.clone();
+                    let edge_id = edge_id.clone();
+                    self.change_line_once(move |library| {
+                        library.remove_constraint(&canvas_id, &edge_id, &constraint_id, Utc::now())
+                    });
+                }
+                LineEdit::Percent(percent) => {
+                    let canvas_id = canvas_id.clone();
+                    let edge_id = edge_id.clone();
+                    let key = format!("percent-{edge_id}");
+                    self.change_line(&key, move |library| {
+                        library.set_constrained_percent(&canvas_id, &edge_id, percent, Utc::now())
+                    });
+                }
+            }
+        }
+    }
+
+    fn task_screen(&mut self, ctx: &egui::Context) {
+        let lists = self.library.task_lists();
+        let today = Local::now().date_naive();
+        let mut jump = None;
+        let mut back = false;
+        let can_back = self.can_go_back();
+        egui::CentralPanel::default()
+            .frame(Frame::none().fill(PAPER).inner_margin(Margin::symmetric(28.0, 18.0)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if can_back && ui.button("←  Back").clicked() {
+                        back = true;
+                    }
+                    ui.label(RichText::new("Tasks").size(26.0).strong().color(INK));
+                });
+                ui.label(
+                    RichText::new("Each task list is one line. Lists, and the tasks inside them, are ordered by the soonest deadline.")
+                        .color(MUTED),
+                );
+                ui.add_space(12.0);
+                if lists.is_empty() {
+                    ui.add_space(48.0);
+                    ui.label(RichText::new("No tasks yet. Select a line on a map to add some.").size(18.0).color(INK));
+                    return;
+                }
+                ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_max_width(820.0);
+                    for list in &lists {
+                        ui.add_space(14.0);
+                        let mut parts = Vec::new();
+                        for (id, text) in self.library.breadcrumb(&list.canvas_id) {
+                            parts.push((label_for(&text), PlaceJump::Canvas(id)));
+                        }
+                        parts.push((
+                            format!(
+                                "{}  ->  {}",
+                                label_for(&list.from_text),
+                                label_for(&list.to_text)
+                            ),
+                            PlaceJump::Line {
+                                canvas_id: list.canvas_id.clone(),
+                                edge_id: list.edge_id.clone(),
+                                focus_id: list.to_id.clone(),
+                            },
+                        ));
+                        if let Some(chosen) = breadcrumb_bar(ui, &parts) {
+                            jump = Some(chosen);
+                        }
+                        for task in &list.tasks {
+                            let due = task
+                                .deadline
+                                .map(|date| date.format("%d %b %Y").to_string())
+                                .unwrap_or_else(|| "No deadline".to_string());
+                            let heat = task
+                                .deadline
+                                .filter(|_| !task.done)
+                                .and_then(|date| deadline_heat(date, today));
+                            let title = if task.done {
+                                format!("✓   {}", label_for(&task.text))
+                            } else {
+                                label_for(&task.text)
+                            };
+                            let response = ui.add(
+                                Button::new(
+                                    RichText::new(format!("    {title}\n    {due}")).color(if task.done { MUTED } else { INK }),
+                                )
+                                .fill(CARD)
+                                .stroke(Stroke::new(1.0, BORDER))
+                                .min_size(vec2(ui.available_width(), 48.0)),
+                            );
+                            if let Some(heat) = heat {
+                                paint_dot_on_button(ui, &response, heat_color(heat));
+                            }
+                            if response.clicked() {
+                                jump = Some(PlaceJump::Line {
+                                    canvas_id: list.canvas_id.clone(),
+                                    edge_id: list.edge_id.clone(),
+                                    focus_id: list.to_id.clone(),
+                                });
+                            }
+                        }
+                    }
+                });
+            });
+        if back {
+            self.go_back();
+        } else if let Some(jump) = jump {
+            self.follow_place(jump);
+        }
+    }
+
+    fn constraint_screen(&mut self, ctx: &egui::Context) {
+        let lists = self.library.constraint_lists();
+        let mut jump = None;
+        let mut back = false;
+        let can_back = self.can_go_back();
+        egui::CentralPanel::default()
+            .frame(Frame::none().fill(PAPER).inner_margin(Margin::symmetric(28.0, 18.0)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if can_back && ui.button("←  Back").clicked() {
+                        back = true;
+                    }
+                    ui.label(RichText::new("Constraints").size(26.0).strong().color(INK));
+                });
+                ui.label(
+                    RichText::new("Each constraint list is one line. The breadcrumb is the idea at the end of that line. Lists with a higher percent constrained come first.")
+                        .color(MUTED),
+                );
+                ui.add_space(12.0);
+                if lists.is_empty() {
+                    ui.add_space(48.0);
+                    ui.label(
+                        RichText::new("No constraints yet. Select a line on a map to add some.")
+                            .size(18.0)
+                            .color(INK),
+                    );
+                    return;
+                }
+                ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_max_width(820.0);
+                    for list in &lists {
+                        ui.add_space(14.0);
+                        let mut parts = Vec::new();
+                        for (id, text) in self.library.breadcrumb(&list.canvas_id) {
+                            parts.push((label_for(&text), PlaceJump::Canvas(id)));
+                        }
+                        parts.push((
+                            label_for(&list.to_text),
+                            PlaceJump::Line {
+                                canvas_id: list.canvas_id.clone(),
+                                edge_id: list.edge_id.clone(),
+                                focus_id: list.to_id.clone(),
+                            },
+                        ));
+                        if let Some(chosen) = breadcrumb_bar(ui, &parts) {
+                            jump = Some(chosen);
+                        }
+                        let summary = match list.constrained_percent {
+                            Some(percent) => format!(
+                                "{}% constrained · {}% still free",
+                                percent.min(100),
+                                100 - percent.min(100)
+                            ),
+                            None => "Percent not set".to_string(),
+                        };
+                        ui.label(RichText::new(summary).color(INK).strong());
+                        for constraint in &list.constraints {
+                            let response = ui.add(
+                                Button::new(RichText::new(format!("    {}", label_for(&constraint.text))).color(INK))
+                                    .fill(CARD)
+                                    .stroke(Stroke::new(1.0, BORDER))
+                                    .min_size(vec2(ui.available_width(), 36.0)),
+                            );
+                            if response.clicked() {
+                                jump = Some(PlaceJump::Line {
+                                    canvas_id: list.canvas_id.clone(),
+                                    edge_id: list.edge_id.clone(),
+                                    focus_id: list.to_id.clone(),
+                                });
+                            }
+                        }
+                    }
+                });
+            });
+        if back {
+            self.go_back();
+        } else if let Some(jump) = jump {
+            self.follow_place(jump);
+        }
+    }
+}
+
+enum LineEdit {
+    AddTask,
+    TaskText(NodeId, String),
+    TaskDone(NodeId, bool),
+    TaskDeadline(NodeId, Option<NaiveDate>),
+    RemoveTask(NodeId),
+    AddConstraint,
+    ConstraintText(NodeId, String),
+    RemoveConstraint(NodeId),
+    Percent(Option<u8>),
 }
 

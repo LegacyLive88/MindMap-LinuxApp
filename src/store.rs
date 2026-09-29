@@ -176,4 +176,67 @@ mod tests {
         assert!(dir.join("canvases").join(format!("{nested}.json")).exists());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn tasks_and_constraints_round_trip_and_old_files_still_open() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 1, 8, 30, 0).unwrap();
+        let mut library = Library::new();
+        let root = library.create_root("Garden", now);
+        let center = library.canvas(&root).unwrap().center_id.clone();
+        let bed = library.add_child_node(&root, &center, now).unwrap();
+        assert!(library.set_text(&root, &bed, "Herb bed".into(), now));
+        let edge = library.canvas(&root).unwrap().edges[0].id.clone();
+        let task = library.add_task(&root, &edge, now).unwrap();
+        assert!(library.set_task_text(&root, &edge, &task, "Water".into(), now));
+        assert!(library.set_task_deadline(
+            &root,
+            &edge,
+            &task,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 5, 4).unwrap()),
+            now,
+        ));
+        let constraint = library.add_constraint(&root, &edge, now).unwrap();
+        assert!(library.set_constraint_text(&root, &edge, &constraint, "Hose".into(), now));
+        assert!(library.set_constrained_percent(&root, &edge, Some(25), now));
+
+        let dir = std::env::temp_dir().join(format!("mindmap-lines-{}", crate::model::new_id()));
+        let _ = fs::remove_dir_all(&dir);
+        save_library(&dir, &library).unwrap();
+        let loaded = load_library(&dir);
+        assert!(loaded.warning.is_none(), "{:?}", loaded.warning);
+        let loaded_edge = loaded
+            .library
+            .canvas(&root)
+            .unwrap()
+            .edges
+            .iter()
+            .find(|item| item.id == edge)
+            .unwrap();
+        assert_eq!(loaded_edge.tasks[0].text, "Water");
+        assert_eq!(loaded_edge.free_percent(), Some(75));
+
+        let old = dir.join("canvases").join("legacy.json");
+        fs::write(
+            &old,
+            r#"{
+                "id": "legacy",
+                "center_id": "legacy-center",
+                "nodes": [{
+                    "id": "legacy-center",
+                    "text": "Already here",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "modified_at": "2024-02-01T00:00:00Z"
+                }],
+                "edges": []
+            }"#,
+        )
+        .unwrap();
+        let loaded = load_library(&dir);
+        assert!(loaded.warning.is_none(), "{:?}", loaded.warning);
+        assert_eq!(
+            loaded.library.canvas("legacy").unwrap().center_text(),
+            "Already here"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

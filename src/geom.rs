@@ -28,6 +28,7 @@ pub struct PlacedNode {
 
 #[derive(Clone, Debug)]
 pub struct RoutedEdge {
+    pub id: Id,
     pub from: Id,
     pub to: Id,
     pub kind: EdgeKind,
@@ -504,6 +505,7 @@ fn route_edges(nodes: &[PlacedNode], canvas: &Canvas) -> Vec<RoutedEdge> {
         let points = route_pair(from, to, nodes, &existing);
         existing.push(points.clone());
         routed.push(RoutedEdge {
+            id: edge.id.clone(),
             from: edge.from.clone(),
             to: edge.to.clone(),
             kind: edge.kind,

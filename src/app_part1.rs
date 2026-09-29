@@ -1,10 +1,13 @@
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use eframe::egui::{
-    self, Align, Align2, Button, Color32, CursorIcon, FontId, Frame, Id, Key, Layout, Margin,
-    Modifiers, Pos2, Rect, RichText, Rounding, ScrollArea, Sense, Stroke, TextEdit, Vec2, vec2,
+    self, Align, Align2, Button, Checkbox, Color32, CursorIcon, FontId, Frame, Id, Key, Layout,
+    Margin, Modifiers, Pos2, Rect, RichText, Rounding, ScrollArea, Sense, Slider, Stroke, TextEdit,
+    Vec2, vec2,
 };
 use mindmap::geom::{self, Layout as MapLayout, PlacedNode, Shape as NodeShape};
-use mindmap::model::{label_for, staleness, EdgeKind, Id as NodeId, Library, Staleness};
+use mindmap::model::{
+    deadline_heat, label_for, staleness, DeadlineHeat, EdgeKind, Id as NodeId, Library, Staleness,
+};
 use mindmap::store::{self, default_data_dir};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -35,12 +38,34 @@ const CLOSED_TEXT: Color32 = Color32::from_rgb(132, 124, 114);
 const YELLOW: Color32 = Color32::from_rgb(228, 176, 46);
 const ORANGE: Color32 = Color32::from_rgb(210, 116, 36);
 const RED: Color32 = Color32::from_rgb(168, 52, 42);
+/// `#fffa` — white at about two-thirds opacity, behind the labels on a line.
+fn line_badge() -> Color32 {
+    Color32::from_rgba_unmultiplied(255, 255, 255, 0xAA)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Screen {
     Welcome,
     Map(NodeId),
     Review,
+    Tasks,
+    Constraints,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Selection {
+    Node(NodeId),
+    Edge(NodeId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PlaceJump {
+    Canvas(NodeId),
+    Line {
+        canvas_id: NodeId,
+        edge_id: NodeId,
+        focus_id: NodeId,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -111,18 +136,23 @@ pub struct MindMapApp {
     undo: Vec<Library>,
     screen: Screen,
     history: Vec<Screen>,
-    selected: Option<NodeId>,
+    selected: Option<Selection>,
     editing: Option<EditState>,
     camera: Camera,
     pending_fit: bool,
     pending_focus: Option<NodeId>,
+    pending_edge: Option<NodeId>,
     gesture: Gesture,
     hover: Option<NodeId>,
+    hover_edge: Option<NodeId>,
     cache: Option<Cache>,
     status: Option<String>,
     confirm_delete: Option<Instant>,
     camera_cmd: Option<CamCmd>,
     block_shift_until: Option<Instant>,
+    line_undo_key: Option<String>,
+    deadline_draft: Option<(NodeId, String)>,
+    line_panel_rect: Option<Rect>,
 }
 
 impl MindMapApp {
@@ -141,13 +171,18 @@ impl MindMapApp {
             camera: Camera::default(),
             pending_fit: false,
             pending_focus: None,
+            pending_edge: None,
             gesture: Gesture::None,
             hover: None,
+            hover_edge: None,
             cache: None,
             status: loaded.warning,
             confirm_delete: None,
             camera_cmd: None,
             block_shift_until: None,
+            line_undo_key: None,
+            deadline_draft: None,
+            line_panel_rect: None,
         };
         app.restore_session();
         app.save();
@@ -238,7 +273,8 @@ impl MindMapApp {
         if owns_undo {
             self.push_undo();
         }
-        self.selected = Some(node_id.to_string());
+        self.line_undo_key = None;
+        self.selected = Some(Selection::Node(node_id.to_string()));
         self.editing = Some(EditState {
             canvas_id: canvas_id.to_string(),
             node_id: node_id.to_string(),
@@ -292,12 +328,16 @@ impl MindMapApp {
             self.history.push(self.screen.clone());
         }
         if let Some(selected) = &self.selected {
-            let exists = match &self.screen {
-                Screen::Map(canvas_id) => self
+            let exists = match (&self.screen, selected) {
+                (Screen::Map(canvas_id), Selection::Node(node_id)) => self
                     .library
                     .canvas(canvas_id)
-                    .and_then(|canvas| canvas.node(selected))
+                    .and_then(|canvas| canvas.node(node_id))
                     .is_some(),
+                (Screen::Map(canvas_id), Selection::Edge(edge_id)) => self
+                    .library
+                    .canvas(canvas_id)
+                    .is_some_and(|canvas| canvas.edges.iter().any(|edge| &edge.id == edge_id)),
                 _ => false,
             };
             if !exists {
@@ -310,7 +350,10 @@ impl MindMapApp {
         self.editing = None;
         self.confirm_delete = None;
         self.gesture = Gesture::None;
-        self.selected = focus.clone();
+        self.line_undo_key = None;
+        self.deadline_draft = None;
+        self.pending_edge = None;
+        self.selected = focus.clone().map(Selection::Node);
         self.pending_focus = focus;
         self.pending_fit = self.pending_focus.is_none();
         self.library.last_open = Some(id.clone());
@@ -418,7 +461,7 @@ impl MindMapApp {
             self.undo.pop();
             return;
         }
-        if self.selected.as_deref() == Some(node_id) {
+        if matches!(&self.selected, Some(Selection::Node(id)) if id == node_id) {
             self.selected = None;
         }
         self.pending_fit = true;
@@ -483,6 +526,16 @@ impl MindMapApp {
                     self.selected = None;
                     self.editing = None;
                 }
+                Some(Screen::Tasks) => {
+                    self.screen = Screen::Tasks;
+                    self.selected = None;
+                    self.editing = None;
+                }
+                Some(Screen::Constraints) => {
+                    self.screen = Screen::Constraints;
+                    self.selected = None;
+                    self.editing = None;
+                }
                 Some(Screen::Welcome) => {
                     self.screen = Screen::Welcome;
                     self.editing = None;
@@ -527,13 +580,80 @@ impl MindMapApp {
     }
 
     fn open_review(&mut self) {
-        if matches!(self.screen, Screen::Review) {
+        self.open_list(Screen::Review);
+    }
+
+    fn open_tasks(&mut self) {
+        self.open_list(Screen::Tasks);
+    }
+
+    fn open_constraints(&mut self) {
+        self.open_list(Screen::Constraints);
+    }
+
+    fn open_list(&mut self, screen: Screen) {
+        if self.screen == screen {
             return;
         }
         self.finish_edit();
-        self.screen = Screen::Review;
-        self.history.push(Screen::Review);
+        self.screen = screen.clone();
+        self.history.push(screen);
         self.selected = None;
+    }
+
+    fn open_line(&mut self, canvas_id: &str, edge_id: &str, focus_id: &str) {
+        self.finish_edit();
+        self.open_map_raw(
+            canvas_id.to_string(),
+            Some(focus_id.to_string()),
+            HistoryMode::Push,
+        );
+        self.pending_edge = Some(edge_id.to_string());
+        self.selected = Some(Selection::Edge(edge_id.to_string()));
+        self.save();
+    }
+
+    fn follow_place(&mut self, jump: PlaceJump) {
+        match jump {
+            PlaceJump::Canvas(id) => {
+                self.finish_edit();
+                self.open_map_raw(id, None, HistoryMode::Push);
+                self.save();
+            }
+            PlaceJump::Line {
+                canvas_id,
+                edge_id,
+                focus_id,
+            } => self.open_line(&canvas_id, &edge_id, &focus_id),
+        }
+    }
+
+    fn change_line(&mut self, key: &str, apply: impl FnOnce(&mut Library) -> bool) {
+        let fresh = self.line_undo_key.as_deref() != Some(key);
+        if fresh {
+            self.push_undo();
+        }
+        if !apply(&mut self.library) {
+            if fresh {
+                self.undo.pop();
+                self.line_undo_key = None;
+            }
+            return;
+        }
+        if fresh {
+            self.line_undo_key = Some(key.to_string());
+        }
+        self.save();
+    }
+
+    fn change_line_once(&mut self, apply: impl FnOnce(&mut Library) -> bool) {
+        self.push_undo();
+        self.line_undo_key = None;
+        if !apply(&mut self.library) {
+            self.undo.pop();
+            return;
+        }
+        self.save();
     }
 
     fn can_go_back(&self) -> bool {
@@ -578,6 +698,7 @@ impl MindMapApp {
             if layout.nodes.iter().any(|node| node.id == id) {
                 self.focus_on(layout, &id);
                 self.pending_focus = None;
+                self.pending_edge = None;
                 self.pending_fit = false;
                 return;
             }
@@ -629,7 +750,11 @@ impl MindMapApp {
             if self.camera.zoom < 1.0 {
                 self.camera.zoom = 1.0;
             }
-            self.selected = Some(id.to_string());
+            if let Some(edge_id) = &self.pending_edge {
+                self.selected = Some(Selection::Edge(edge_id.clone()));
+            } else {
+                self.selected = Some(Selection::Node(id.to_string()));
+            }
         }
     }
 
@@ -669,7 +794,7 @@ impl MindMapApp {
             self.center_circle(layout);
         }
         if delete_key {
-            if let Some(id) = self.selected.clone() {
+            if let Some(Selection::Node(id)) = self.selected.clone() {
                 let is_center = self
                     .library
                     .canvas(canvas_id)
@@ -716,11 +841,24 @@ impl MindMapApp {
     ) {
         let ctrl = ctx.input(|input| input.modifiers.ctrl);
         let shift = ctx.input(|input| input.modifiers.shift);
-        self.hover = response.hover_pos().and_then(|pos| {
-            hit_test(layout, self.camera.screen_to_world(pos, viewport))
-        });
+        let hover_world = response
+            .hover_pos()
+            .map(|pos| self.camera.screen_to_world(pos, viewport));
+        self.hover = hover_world.and_then(|world| hit_test(layout, world));
+        self.hover_edge = if self.hover.is_none() {
+            hover_world.and_then(|world| hit_test_edge(layout, world, self.camera.zoom))
+        } else {
+            None
+        };
 
+        let on_panel = |pos: Pos2| self.line_panel_rect.is_some_and(|rect| rect.contains(pos));
         if response.drag_started() {
+            if ctx
+                .input(|input| input.pointer.press_origin())
+                .is_some_and(on_panel)
+            {
+                self.gesture = Gesture::None;
+            } else {
             // A fast drag can cross the threshold in the same frame as the press.
             // The live pointer is already somewhere else; the press is where it began.
             let origin = ctx
@@ -742,6 +880,7 @@ impl MindMapApp {
                 };
             } else {
                 self.gesture = Gesture::Panning;
+            }
             }
         }
 
@@ -766,7 +905,10 @@ impl MindMapApp {
             handled_drag = true;
         }
 
-        if response.clicked() && !handled_drag {
+        let click_on_panel = response
+            .interact_pointer_pos()
+            .is_some_and(|pos| self.line_panel_rect.is_some_and(|rect| rect.contains(pos)));
+        if response.clicked() && !handled_drag && !click_on_panel {
             let hit = response.interact_pointer_pos().and_then(|pos| {
                 hit_test(layout, self.camera.screen_to_world(pos, viewport))
             });
@@ -782,11 +924,27 @@ impl MindMapApp {
                 }
             } else if response.double_clicked() {
                 if let Some(id) = hit {
-                    self.selected = Some(id.clone());
+                    self.selected = Some(Selection::Node(id.clone()));
                     self.begin_edit(canvas_id, &id, true);
                 }
+            } else if let Some(id) = hit {
+                self.line_undo_key = None;
+                self.deadline_draft = None;
+                self.selected = Some(Selection::Node(id));
+            } else if let Some(edge_id) = response.interact_pointer_pos().and_then(|pos| {
+                hit_test_edge(
+                    layout,
+                    self.camera.screen_to_world(pos, viewport),
+                    self.camera.zoom,
+                )
+            }) {
+                self.line_undo_key = None;
+                self.deadline_draft = None;
+                self.selected = Some(Selection::Edge(edge_id));
             } else {
-                self.selected = hit;
+                self.line_undo_key = None;
+                self.deadline_draft = None;
+                self.selected = None;
             }
         }
 
@@ -805,7 +963,7 @@ impl MindMapApp {
             CursorIcon::Crosshair
         } else if ctrl && self.hover.is_some() {
             CursorIcon::Copy
-        } else if self.hover.is_some() {
+        } else if self.hover.is_some() || self.hover_edge.is_some() {
             CursorIcon::PointingHand
         } else {
             CursorIcon::Grab
@@ -862,6 +1020,8 @@ impl eframe::App for MindMapApp {
         match self.screen.clone() {
             Screen::Welcome => self.welcome(ctx),
             Screen::Review => self.review(ctx),
+            Screen::Tasks => self.task_screen(ctx),
+            Screen::Constraints => self.constraint_screen(ctx),
             Screen::Map(id) => self.map_screen(ctx, &id),
         }
     }
