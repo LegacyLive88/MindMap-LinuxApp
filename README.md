@@ -44,6 +44,8 @@ Every change is written immediately. The JSON is plain text. Copy the program an
 - **Ctrl+click** the circle or a rectangle to add a connected rectangle. A short Ctrl+drag that ends on empty space does the same.
 - **Ctrl+drag** from one rectangle to another to connect them.
 - **Click** a rectangle to select it. The panel shows when it was created and when it, or anything inside it, was last changed. From there you can edit, close, open, or delete it.
+- **Click a line** to give it a task list and constraints. Each task can have a deadline. A deadline within 3 days turns the line red, within a week orange, and within 3 weeks yellow. A line with unfinished tasks shows how many are done, such as `1/3`. If you set a percent constrained, the line shows the share that is still free, such as `70%` when 30% is constrained. Both labels sit in the middle of the line. Editing a line updates the modified date of the ideas it joins.
+- **Tasks** in the left panel lists every task list, with a breadcrumb back to that line, ordered by the soonest deadline. **Constraints** does the same for constraint lists, using the idea at the end of the line, and puts the most constrained lines first.
 - **Close** greys out that rectangle and every rectangle branched from it. Closed ideas cannot be edited. Open the rectangle that was closed to work on it again.
 - **Delete** removes that rectangle and every line touching it. Rectangles that branched from it stay on the map, detached, and are arranged underneath. A nested map that belonged to the deleted rectangle is kept as its own canvas in the sidebar.
 - **Double-click** a rectangle or the centre circle to edit its text, unless it is closed. Ctrl+Enter finishes the edit, and so does a click outside the text. Escape cancels.

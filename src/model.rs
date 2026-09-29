@@ -4,7 +4,7 @@
 //! rectangle. Ctrl+drag adds a non-hierarchical link. Shift+click opens that
 //! idea as its own canvas. Closing a rectangle closes its descendants.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -47,11 +47,66 @@ pub struct Node {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Task {
+    pub id: Id,
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<NaiveDate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Constraint {
+    pub id: Id,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     pub id: Id,
     pub from: Id,
     pub to: Id,
     pub kind: EdgeKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<Task>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<Constraint>,
+    /// Share of this line that is constrained, from 0 to 100.
+    /// Absent on older files, and until the user sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constrained_percent: Option<u8>,
+}
+
+/// How soon an open task is due. Red is the most urgent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DeadlineHeat {
+    Red,
+    Orange,
+    Yellow,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskList {
+    pub canvas_id: Id,
+    pub edge_id: Id,
+    pub from_id: Id,
+    pub to_id: Id,
+    pub from_text: String,
+    pub to_text: String,
+    pub tasks: Vec<Task>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConstraintList {
+    pub canvas_id: Id,
+    pub edge_id: Id,
+    pub from_id: Id,
+    pub to_id: Id,
+    pub from_text: String,
+    pub to_text: String,
+    pub constraints: Vec<Constraint>,
+    pub constrained_percent: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +163,68 @@ pub fn staleness(modified: DateTime<Utc>, now: DateTime<Utc>) -> Staleness {
         Staleness::Yellow
     } else {
         Staleness::Fresh
+    }
+}
+
+/// Colour for a deadline measured in calendar days from today.
+/// Due today, overdue, or due within 3 days is red. Within a week is orange.
+/// Within 3 weeks is yellow.
+pub fn deadline_heat(deadline: NaiveDate, today: NaiveDate) -> Option<DeadlineHeat> {
+    let days = (deadline - today).num_days();
+    if days <= 3 {
+        Some(DeadlineHeat::Red)
+    } else if days <= 7 {
+        Some(DeadlineHeat::Orange)
+    } else if days <= 21 {
+        Some(DeadlineHeat::Yellow)
+    } else {
+        None
+    }
+}
+
+fn new_edge(from: Id, to: Id, kind: EdgeKind) -> Edge {
+    Edge {
+        id: new_id(),
+        from,
+        to,
+        kind,
+        tasks: Vec::new(),
+        constraints: Vec::new(),
+        constrained_percent: None,
+    }
+}
+
+impl Edge {
+    /// Completed tasks over the total, when at least one task is still open.
+    pub fn open_task_ratio(&self) -> Option<(usize, usize)> {
+        if self.tasks.is_empty() {
+            return None;
+        }
+        let done = self.tasks.iter().filter(|task| task.done).count();
+        let total = self.tasks.len();
+        if done == total {
+            return None;
+        }
+        Some((done, total))
+    }
+
+    /// The share of the line that is not constrained, once a percent is set
+    /// and at least one constraint has been entered.
+    pub fn free_percent(&self) -> Option<u8> {
+        if self.constraints.is_empty() {
+            return None;
+        }
+        self.constrained_percent
+            .map(|percent| 100 - percent.min(100))
+    }
+
+    pub fn heat(&self, today: NaiveDate) -> Option<DeadlineHeat> {
+        self.tasks
+            .iter()
+            .filter(|task| !task.done)
+            .filter_map(|task| task.deadline)
+            .filter_map(|deadline| deadline_heat(deadline, today))
+            .min()
     }
 }
 
@@ -225,12 +342,11 @@ impl Library {
             parent_id: Some(parent_id.to_string()),
             child_canvas_id: None,
         });
-        canvas.edges.push(Edge {
-            id: new_id(),
-            from: parent_id.to_string(),
-            to: node_id.clone(),
-            kind: EdgeKind::Tree,
-        });
+        canvas.edges.push(new_edge(
+            parent_id.to_string(),
+            node_id.clone(),
+            EdgeKind::Tree,
+        ));
         if let Some(parent) = canvas.node_mut(parent_id) {
             parent.modified_at = now;
         }
@@ -264,12 +380,7 @@ impl Library {
         let Some(canvas) = self.canvases.get_mut(canvas_id) else {
             return false;
         };
-        canvas.edges.push(Edge {
-            id: new_id(),
-            from: a.to_string(),
-            to: b.to_string(),
-            kind: EdgeKind::Link,
-        });
+        canvas.edges.push(new_edge(a.to_string(), b.to_string(), EdgeKind::Link));
         if let Some(node) = canvas.node_mut(a) {
             node.modified_at = now;
         }
@@ -523,6 +634,379 @@ impl Library {
         items
     }
 
+    pub fn edge_closed(&self, canvas_id: &str, edge_id: &str) -> bool {
+        let Some(canvas) = self.canvases.get(canvas_id) else {
+            return true;
+        };
+        let Some(edge) = canvas.edges.iter().find(|edge| edge.id == edge_id) else {
+            return true;
+        };
+        canvas.effectively_closed(&edge.from) || canvas.effectively_closed(&edge.to)
+    }
+
+    pub fn add_task(&mut self, canvas_id: &str, edge_id: &str, now: DateTime<Utc>) -> Option<Id> {
+        if self.edge_closed(canvas_id, edge_id) {
+            return None;
+        }
+        let task_id = new_id();
+        {
+            let canvas = self.canvases.get_mut(canvas_id)?;
+            let edge = canvas.edges.iter_mut().find(|edge| edge.id == edge_id)?;
+            edge.tasks.push(Task {
+                id: task_id.clone(),
+                text: String::new(),
+                done: false,
+                deadline: None,
+            });
+        }
+        self.stamp_edge(canvas_id, edge_id, now);
+        Some(task_id)
+    }
+
+    pub fn set_task_text(
+        &mut self,
+        canvas_id: &str,
+        edge_id: &str,
+        task_id: &str,
+        text: String,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self.edge_closed(canvas_id, edge_id) {
+            return false;
+        }
+        let changed = {
+            let Some(canvas) = self.canvases.get_mut(canvas_id) else {
+                return false;
+            };
+            let Some(edge) = canvas.edges.iter_mut().find(|edge| edge.id == edge_id) else {
+                return false;
+            };
+            let Some(task) = edge.tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            if task.text == text {
+                return true;
+            }
+            task.text = text;
+            true
+        };
+        if changed {
+            self.stamp_edge(canvas_id, edge_id, now);
+        }
+        changed
+    }
+
+    pub fn set_task_done(
+        &mut self,
+        canvas_id: &str,
+        edge_id: &str,
+        task_id: &str,
+        done: bool,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self.edge_closed(canvas_id, edge_id) {
+            return false;
+        }
+        let changed = {
+            let Some(canvas) = self.canvases.get_mut(canvas_id) else {
+                return false;
+            };
+            let Some(edge) = canvas.edges.iter_mut().find(|edge| edge.id == edge_id) else {
+                return false;
+            };
+            let Some(task) = edge.tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            if task.done == done {
+                return true;
+            }
+            task.done = done;
+            true
+        };
+        if changed {
+            self.stamp_edge(canvas_id, edge_id, now);
+        }
+        changed
+    }
+
+    pub fn set_task_deadline(
+        &mut self,
+        canvas_id: &str,
+        edge_id: &str,
+        task_id: &str,
+        deadline: Option<NaiveDate>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self.edge_closed(canvas_id, edge_id) {
+            return false;
+        }
+        let changed = {
+            let Some(canvas) = self.canvases.get_mut(canvas_id) else {
+                return false;
+            };
+            let Some(edge) = canvas.edges.iter_mut().find(|edge| edge.id == edge_id) else {
+                return false;
+            };
+            let Some(task) = edge.tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            if task.deadline == deadline {
+                return true;
+            }
+            task.deadline = deadline;
+            true
+        };
+        if changed {
+            self.stamp_edge(canvas_id, edge_id, now);
+        }
+        changed
+    }
+
+    pub fn remove_task(
+        &mut self,
+        canvas_id: &str,
+        edge_id: &str,
+        task_id: &str,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self.edge_closed(canvas_id, edge_id) {
+            return false;
+        }
+        let removed = {
+            let Some(canvas) = self.canvases.get_mut(canvas_id) else {
+                return false;
+            };
+            let Some(edge) = canvas.edges.iter_mut().find(|edge| edge.id == edge_id) else {
+                return false;
+            };
+            let before = edge.tasks.len();
+            edge.tasks.retain(|task| task.id != task_id);
+            edge.tasks.len() != before
+        };
+        if removed {
+            self.stamp_edge(canvas_id, edge_id, now);
+        }
+        removed
+    }
+
+    pub fn add_constraint(&mut self, canvas_id: &str, edge_id: &str, now: DateTime<Utc>) -> Option<Id> {
+        if self.edge_closed(canvas_id, edge_id) {
+            return None;
+        }
+        let constraint_id = new_id();
+        {
+            let canvas = self.canvases.get_mut(canvas_id)?;
+            let edge = canvas.edges.iter_mut().find(|edge| edge.id == edge_id)?;
+            edge.constraints.push(Constraint {
+                id: constraint_id.clone(),
+                text: String::new(),
+            });
+        }
+        self.stamp_edge(canvas_id, edge_id, now);
+        Some(constraint_id)
+    }
+
+    pub fn set_constraint_text(
+        &mut self,
+        canvas_id: &str,
+        edge_id: &str,
+        constraint_id: &str,
+        text: String,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self.edge_closed(canvas_id, edge_id) {
+            return false;
+        }
+        let changed = {
+            let Some(canvas) = self.canvases.get_mut(canvas_id) else {
+                return false;
+            };
+            let Some(edge) = canvas.edges.iter_mut().find(|edge| edge.id == edge_id) else {
+                return false;
+            };
+            let Some(constraint) = edge
+                .constraints
+                .iter_mut()
+                .find(|constraint| constraint.id == constraint_id)
+            else {
+                return false;
+            };
+            if constraint.text == text {
+                return true;
+            }
+            constraint.text = text;
+            true
+        };
+        if changed {
+            self.stamp_edge(canvas_id, edge_id, now);
+        }
+        changed
+    }
+
+    pub fn remove_constraint(
+        &mut self,
+        canvas_id: &str,
+        edge_id: &str,
+        constraint_id: &str,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self.edge_closed(canvas_id, edge_id) {
+            return false;
+        }
+        let removed = {
+            let Some(canvas) = self.canvases.get_mut(canvas_id) else {
+                return false;
+            };
+            let Some(edge) = canvas.edges.iter_mut().find(|edge| edge.id == edge_id) else {
+                return false;
+            };
+            let before = edge.constraints.len();
+            edge.constraints.retain(|constraint| constraint.id != constraint_id);
+            edge.constraints.len() != before
+        };
+        if removed {
+            self.stamp_edge(canvas_id, edge_id, now);
+        }
+        removed
+    }
+
+    pub fn set_constrained_percent(
+        &mut self,
+        canvas_id: &str,
+        edge_id: &str,
+        percent: Option<u8>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self.edge_closed(canvas_id, edge_id) {
+            return false;
+        }
+        let percent = percent.map(|value| value.min(100));
+        let changed = {
+            let Some(canvas) = self.canvases.get_mut(canvas_id) else {
+                return false;
+            };
+            let Some(edge) = canvas.edges.iter_mut().find(|edge| edge.id == edge_id) else {
+                return false;
+            };
+            if edge.constraints.is_empty() {
+                return false;
+            }
+            if edge.constrained_percent == percent {
+                return true;
+            }
+            edge.constrained_percent = percent;
+            true
+        };
+        if changed {
+            self.stamp_edge(canvas_id, edge_id, now);
+        }
+        changed
+    }
+
+    /// One group per line that has tasks. Groups and the tasks inside them
+    /// are ordered by the soonest open deadline.
+    pub fn task_lists(&self) -> Vec<TaskList> {
+        let mut lists = Vec::new();
+        for canvas in self.canvases.values() {
+            for edge in &canvas.edges {
+                if edge.tasks.is_empty() {
+                    continue;
+                }
+                let mut tasks = edge.tasks.clone();
+                tasks.sort_by(cmp_tasks_by_deadline);
+                lists.push(TaskList {
+                    canvas_id: canvas.id.clone(),
+                    edge_id: edge.id.clone(),
+                    from_id: edge.from.clone(),
+                    to_id: edge.to.clone(),
+                    from_text: canvas
+                        .node(&edge.from)
+                        .map(|node| node.text.clone())
+                        .unwrap_or_default(),
+                    to_text: canvas
+                        .node(&edge.to)
+                        .map(|node| node.text.clone())
+                        .unwrap_or_default(),
+                    tasks,
+                });
+            }
+        }
+        lists.sort_by(|left, right| {
+            let left_due = soonest_open_deadline(&left.tasks);
+            let right_due = soonest_open_deadline(&right.tasks);
+            match (left_due, right_due) {
+                (Some(left_due), Some(right_due)) => left_due.cmp(&right_due),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => left
+                    .from_text
+                    .cmp(&right.from_text)
+                    .then(left.to_text.cmp(&right.to_text))
+                    .then(left.edge_id.cmp(&right.edge_id)),
+            }
+        });
+        lists
+    }
+
+    /// One group per line that has constraints, soonest to the most constrained.
+    pub fn constraint_lists(&self) -> Vec<ConstraintList> {
+        let mut lists = Vec::new();
+        for canvas in self.canvases.values() {
+            for edge in &canvas.edges {
+                if edge.constraints.is_empty() {
+                    continue;
+                }
+                lists.push(ConstraintList {
+                    canvas_id: canvas.id.clone(),
+                    edge_id: edge.id.clone(),
+                    from_id: edge.from.clone(),
+                    to_id: edge.to.clone(),
+                    from_text: canvas
+                        .node(&edge.from)
+                        .map(|node| node.text.clone())
+                        .unwrap_or_default(),
+                    to_text: canvas
+                        .node(&edge.to)
+                        .map(|node| node.text.clone())
+                        .unwrap_or_default(),
+                    constraints: edge.constraints.clone(),
+                    constrained_percent: edge.constrained_percent,
+                });
+            }
+        }
+        lists.sort_by(|left, right| {
+            match (left.constrained_percent, right.constrained_percent) {
+                (Some(left_percent), Some(right_percent)) => right_percent
+                    .cmp(&left_percent)
+                    .then(left.to_text.cmp(&right.to_text))
+                    .then(left.edge_id.cmp(&right.edge_id)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => left
+                    .to_text
+                    .cmp(&right.to_text)
+                    .then(left.edge_id.cmp(&right.edge_id)),
+            }
+        });
+        lists
+    }
+
+    fn stamp_edge(&mut self, canvas_id: &str, edge_id: &str, now: DateTime<Utc>) {
+        let Some(canvas) = self.canvases.get_mut(canvas_id) else {
+            return;
+        };
+        let Some(edge) = canvas.edges.iter().find(|edge| edge.id == edge_id) else {
+            return;
+        };
+        let from = edge.from.clone();
+        let to = edge.to.clone();
+        for node in &mut canvas.nodes {
+            if node.id == from || node.id == to {
+                node.modified_at = now;
+            }
+        }
+    }
+
     pub fn repair(&mut self) {
         let ids: Vec<Id> = self.canvases.keys().cloned().collect();
         for id in ids {
@@ -681,13 +1165,35 @@ impl Library {
             })
             .collect();
         for (parent, child) in missing {
-            canvas.edges.push(Edge {
-                id: new_id(),
-                from: parent,
-                to: child,
-                kind: EdgeKind::Tree,
-            });
+            canvas.edges.push(new_edge(parent, child, EdgeKind::Tree));
         }
+
+        for edge in &mut canvas.edges {
+            if let Some(percent) = edge.constrained_percent {
+                edge.constrained_percent = Some(percent.min(100));
+            }
+        }
+    }
+}
+
+fn soonest_open_deadline(tasks: &[Task]) -> Option<NaiveDate> {
+    tasks
+        .iter()
+        .filter(|task| !task.done)
+        .filter_map(|task| task.deadline)
+        .min()
+}
+
+fn cmp_tasks_by_deadline(left: &Task, right: &Task) -> std::cmp::Ordering {
+    match (left.done, right.done) {
+        (false, true) => std::cmp::Ordering::Less,
+        (true, false) => std::cmp::Ordering::Greater,
+        _ => match (left.deadline, right.deadline) {
+            (Some(left_due), Some(right_due)) => left_due.cmp(&right_due),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.id.cmp(&right.id),
+        },
     }
 }
 
@@ -866,5 +1372,167 @@ mod tests {
         assert_eq!(stale[0].staleness, Staleness::Red);
         assert_eq!(stale[1].staleness, Staleness::Orange);
         assert_eq!(stale[2].staleness, Staleness::Yellow);
+    }
+
+    #[test]
+    fn older_canvas_json_without_tasks_still_loads() {
+        let json = r#"{
+            "id": "canvas-old",
+            "center_id": "center-old",
+            "nodes": [
+                {
+                    "id": "center-old",
+                    "text": "Kept",
+                    "created_at": "2024-03-01T10:00:00Z",
+                    "modified_at": "2024-06-01T10:00:00Z"
+                },
+                {
+                    "id": "child-old",
+                    "text": "Branch",
+                    "created_at": "2024-03-02T10:00:00Z",
+                    "modified_at": "2024-06-02T10:00:00Z",
+                    "parent_id": "center-old"
+                }
+            ],
+            "edges": [
+                {
+                    "id": "edge-old",
+                    "from": "center-old",
+                    "to": "child-old",
+                    "kind": "tree"
+                }
+            ]
+        }"#;
+        let canvas: Canvas = serde_json::from_str(json).unwrap();
+        assert_eq!(canvas.center_text(), "Kept");
+        assert!(canvas.edges[0].tasks.is_empty());
+        assert!(canvas.edges[0].constraints.is_empty());
+        assert_eq!(canvas.edges[0].constrained_percent, None);
+        let mut library = Library::new();
+        library.canvases.insert(canvas.id.clone(), canvas);
+        library.repair();
+        let canvas = library.canvas("canvas-old").unwrap();
+        assert_eq!(canvas.node("child-old").unwrap().text, "Branch");
+        assert_eq!(canvas.edges.len(), 1);
+        assert!(canvas.edges[0].tasks.is_empty());
+    }
+
+    #[test]
+    fn line_tasks_move_the_modified_clock_and_colour_by_deadline() {
+        let now = fixed_now();
+        let today = now.date_naive();
+        let mut library = Library::new();
+        let root = library.create_root("Plan", now);
+        let center = library.canvas(&root).unwrap().center_id.clone();
+        let _child = library.add_child_node(&root, &center, now).unwrap();
+        let edge = library.canvas(&root).unwrap().edges[0].id.clone();
+        let before = library.collective_modified(&root, &center).unwrap();
+        let later = now + Duration::hours(3);
+        let task = library.add_task(&root, &edge, later).unwrap();
+        assert!(library.set_task_text(&root, &edge, &task, "Draft".into(), later));
+        assert_eq!(library.collective_modified(&root, &center), Some(later));
+        assert!(before < later);
+
+        assert!(library.set_task_deadline(&root, &edge, &task, Some(today + Duration::days(3)), later));
+        let edge_ref = library
+            .canvas(&root)
+            .unwrap()
+            .edges
+            .iter()
+            .find(|item| item.id == edge)
+            .unwrap();
+        assert_eq!(edge_ref.heat(today), Some(DeadlineHeat::Red));
+        assert_eq!(edge_ref.open_task_ratio(), Some((0, 1)));
+
+        assert!(library.set_task_deadline(&root, &edge, &task, Some(today + Duration::days(4)), later));
+        assert!(library.set_task_deadline(&root, &edge, &task, Some(today + Duration::days(7)), later));
+        let edge_ref = library.canvas(&root).unwrap().edges.iter().find(|item| item.id == edge).unwrap();
+        assert_eq!(edge_ref.heat(today), Some(DeadlineHeat::Orange));
+
+        assert!(library.set_task_deadline(&root, &edge, &task, Some(today + Duration::days(8)), later));
+        assert!(library.set_task_deadline(&root, &edge, &task, Some(today + Duration::days(21)), later));
+        let edge_ref = library.canvas(&root).unwrap().edges.iter().find(|item| item.id == edge).unwrap();
+        assert_eq!(edge_ref.heat(today), Some(DeadlineHeat::Yellow));
+
+        assert!(library.set_task_deadline(&root, &edge, &task, Some(today + Duration::days(22)), later));
+        let edge_ref = library.canvas(&root).unwrap().edges.iter().find(|item| item.id == edge).unwrap();
+        assert_eq!(edge_ref.heat(today), None);
+
+        assert!(library.set_task_deadline(&root, &edge, &task, Some(today - Duration::days(1)), later));
+        let edge_ref = library.canvas(&root).unwrap().edges.iter().find(|item| item.id == edge).unwrap();
+        assert_eq!(edge_ref.heat(today), Some(DeadlineHeat::Red));
+
+        assert!(library.set_task_done(&root, &edge, &task, true, later));
+        let edge_ref = library.canvas(&root).unwrap().edges.iter().find(|item| item.id == edge).unwrap();
+        assert_eq!(edge_ref.heat(today), None);
+        assert_eq!(edge_ref.open_task_ratio(), None);
+    }
+
+    #[test]
+    fn constraint_percent_is_the_free_share_and_lists_follow_urgency() {
+        let now = fixed_now();
+        let today = now.date_naive();
+        let mut library = Library::new();
+        let root = library.create_root("Plan", now);
+        let center = library.canvas(&root).unwrap().center_id.clone();
+        let soon = library.add_child_node(&root, &center, now).unwrap();
+        let later_node = library
+            .add_child_node(&root, &center, now + Duration::seconds(1))
+            .unwrap();
+        assert!(library.set_text(&root, &soon, "Soon".into(), now));
+        assert!(library.set_text(&root, &later_node, "Later".into(), now));
+        let soon_edge = library
+            .canvas(&root)
+            .unwrap()
+            .edges
+            .iter()
+            .find(|edge| edge.to == soon)
+            .unwrap()
+            .id
+            .clone();
+        let later_edge = library
+            .canvas(&root)
+            .unwrap()
+            .edges
+            .iter()
+            .find(|edge| edge.to == later_node)
+            .unwrap()
+            .id
+            .clone();
+
+        let soon_task = library.add_task(&root, &soon_edge, now).unwrap();
+        library
+            .set_task_deadline(&root, &soon_edge, &soon_task, Some(today + Duration::days(2)), now);
+        let later_task = library.add_task(&root, &later_edge, now).unwrap();
+        library.set_task_deadline(
+            &root,
+            &later_edge,
+            &later_task,
+            Some(today + Duration::days(10)),
+            now,
+        );
+        let lists = library.task_lists();
+        assert_eq!(lists[0].edge_id, soon_edge);
+        assert_eq!(lists[1].edge_id, later_edge);
+
+        assert!(library.set_constrained_percent(&root, &soon_edge, Some(40), now) == false);
+        let tight = library.add_constraint(&root, &soon_edge, now).unwrap();
+        let loose = library.add_constraint(&root, &later_edge, now).unwrap();
+        assert!(library.set_constraint_text(&root, &soon_edge, &tight, "Budget".into(), now));
+        assert!(library.set_constraint_text(&root, &later_edge, &loose, "Time".into(), now));
+        assert!(library.set_constrained_percent(&root, &soon_edge, Some(40), now));
+        assert!(library.set_constrained_percent(&root, &later_edge, Some(85), now));
+        let soon_edge_ref = library
+            .canvas(&root)
+            .unwrap()
+            .edges
+            .iter()
+            .find(|edge| edge.id == soon_edge)
+            .unwrap();
+        assert_eq!(soon_edge_ref.free_percent(), Some(60));
+        let ordered = library.constraint_lists();
+        assert_eq!(ordered[0].edge_id, later_edge);
+        assert_eq!(ordered[0].to_text, "Later");
+        assert_eq!(ordered[1].constrained_percent, Some(40));
     }
 }
