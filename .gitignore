@@ -1,5 +1,6 @@
 /target
 /dist
 /mindmap-data
+/win/mindmap-data
 **/*.tmp
 **/*.json.tmp
