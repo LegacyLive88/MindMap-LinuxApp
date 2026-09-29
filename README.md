@@ -1,8 +1,29 @@
 # MindMap
 
-A portable mind-mapping canvas for Linux. Each canvas starts as one circle. Branch out from that circle, link ideas, and open any idea as a map of its own.
+A portable mind-mapping canvas for Linux and Windows. Each canvas starts as one circle. Branch out from that circle, link ideas, and open any idea as a map of its own. The window, the controls, and the files on disk are the same on both systems.
 
-## Build
+## Windows
+
+`win/mindmap.exe` is a standalone 64-bit Windows program. Double-click it. Maps are written to a `mindmap-data` folder in the same folder as the program:
+
+```text
+win/mindmap.exe
+win/mindmap-data/
+  manifest.json
+  canvases/<id>.json
+```
+
+Copy the program and that folder together to move your maps. Nothing else has to be installed.
+
+To rebuild the program on a Windows machine, install Rust from https://rustup.rs and then, from the repository root:
+
+```powershell
+.\win\build.ps1
+```
+
+That writes a new `win\mindmap.exe`.
+
+## Build on Linux
 
 Install Rust (1.88 or newer) and the usual X11 and OpenGL build libraries. On Linux Mint:
 
@@ -12,7 +33,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ./build.sh
 ```
 
-`./build.sh` writes a single program to `dist/mindmap`. Run that file:
+`./build.sh` writes a single program to `dist/mindmap`. To cross-compile the Windows program from Linux as well, run `./win/build.sh` (that needs the MinGW gcc, `gcc-mingw-w64-x86-64`). Run the Linux file:
 
 ```bash
 ./dist/mindmap
