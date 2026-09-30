@@ -153,6 +153,7 @@ pub struct MindMapApp {
     line_undo_key: Option<String>,
     deadline_draft: Option<(NodeId, String)>,
     line_panel_rect: Option<Rect>,
+    cloud: CloudPanel,
 }
 
 impl MindMapApp {
@@ -160,6 +161,8 @@ impl MindMapApp {
         apply_style(&cc.egui_ctx);
         let data_dir = default_data_dir();
         let loaded = store::load_library(&data_dir);
+        let mut cloud = CloudPanel::open(&data_dir);
+        cloud.observe_library(&loaded.library);
         let mut app = Self {
             data_dir,
             library: loaded.library,
@@ -183,6 +186,7 @@ impl MindMapApp {
             line_undo_key: None,
             deadline_draft: None,
             line_panel_rect: None,
+            cloud,
         };
         app.restore_session();
         app.save();
@@ -213,6 +217,7 @@ impl MindMapApp {
     fn save(&mut self) {
         match store::save_library(&self.data_dir, &self.library) {
             Ok(()) => {
+                self.cloud.observe_library(&self.library);
                 if self
                     .status
                     .as_ref()
@@ -998,7 +1003,11 @@ impl eframe::App for MindMapApp {
             }
             hit
         });
-        if undo {
+        // The cloud window has its own text fields. Undo still cancels an idea
+        // edit on the canvas, and still undoes a map change when those fields
+        // are not focused.
+        let cloud_typing = self.cloud.open && ctx.wants_keyboard_input() && self.editing.is_none();
+        if undo && !cloud_typing {
             self.undo_action();
         }
         if self.editing.is_some() {
@@ -1016,6 +1025,12 @@ impl eframe::App for MindMapApp {
             }
         }
 
+        self.cloud.tick();
+        if let Some(effect) = self.cloud.take_effect() {
+            self.apply_cloud_effect(effect);
+        }
+        self.cloud.request_repaint(ctx);
+
         self.sidebar(ctx);
         match self.screen.clone() {
             Screen::Welcome => self.welcome(ctx),
@@ -1024,6 +1039,7 @@ impl eframe::App for MindMapApp {
             Screen::Constraints => self.constraint_screen(ctx),
             Screen::Map(id) => self.map_screen(ctx, &id),
         }
+        self.cloud.ui(ctx);
     }
 }
 

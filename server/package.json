@@ -1,0 +1,22 @@
+{
+  "name": "mindmap-cloud",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MindMap cloud endpoint: sign-in, backups, and sync for the desktop apps.",
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p ${PORT:-3000}",
+    "build": "next build",
+    "start": "next start -H ${HOST:-127.0.0.1} -p ${PORT:-3000}",
+    "setup": "node scripts/setup-db.js",
+    "create-user": "node scripts/create-user.js",
+    "test": "node --test lib/library.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "mysql2": "^3.11.5",
+    "next": "^14.2.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
