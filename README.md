@@ -59,6 +59,24 @@ dist/mindmap-data/
 
 Every change is written immediately. The JSON is plain text. Copy the program and that folder together to move your maps.
 
+If you connect the program to a cloud, the same folder also holds:
+
+```text
+mindmap-data/
+  cloud.key            key created on this computer
+  cloud.enc            cloud address, username, and password, encrypted
+  sync-state.json      which cloud revision this computer last matched
+  conflicts/           a local copy kept before a cloud download replaces the maps
+```
+
+`cloud.enc` is not plain text. `cloud.key` sits beside it so the program can open the settings the next time it starts. Copy both files with the maps if you move the folder. The maps themselves stay unencrypted JSON.
+
+## Cloud
+
+The gear at the top of the sidebar sets the public address of a MindMap cloud, plus the username and password for that cloud. When this computer can reach that address, changes are sent up and changes made in the browser (or on another device using the same account) come back down. If there is no connection, edits stay in `mindmap-data` and are sent the next time a sync succeeds. Each accepted upload stores the previous cloud copy as a backup.
+
+The server you put at that address lives in `server/`. See `server/README.md` for the cPanel, MariaDB, and nginx setup. A later mobile app can use the same `/api/v1` routes.
+
 ## Using the canvas
 
 - **New canvas** starts a map. Its circle sits in the middle.

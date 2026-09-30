@@ -4,3 +4,8 @@
 /win/mindmap-data
 **/*.tmp
 **/*.json.tmp
+server/node_modules
+server/.next
+server/.env
+server/cpanel/vendor
+server/cpanel/upstream.txt

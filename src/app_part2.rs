@@ -34,6 +34,8 @@ impl MindMapApp {
         let constraints_open = matches!(self.screen, Screen::Constraints);
         let task_count = self.library.task_lists().len();
         let constraint_count = self.library.constraint_lists().len();
+        let (sync_line, sync_color) = self.cloud.status_line();
+        let mut open_settings = false;
 
         egui::SidePanel::left("nav")
             .exact_width(276.0)
@@ -49,6 +51,11 @@ impl MindMapApp {
                     let (rect, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
                     ui.painter().circle_filled(rect.center(), 8.0, TEAL);
                     ui.label(RichText::new("MindMap").size(20.0).strong().color(CREAM));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if gear_button(ui).on_hover_text("Cloud settings").clicked() {
+                            open_settings = true;
+                        }
+                    });
                 });
                 ui.label(
                     RichText::new("A circle at the centre. Maps inside maps.")
@@ -65,7 +72,7 @@ impl MindMapApp {
                 ui.add_space(14.0);
                 ui.label(RichText::new("CANVASES").size(11.0).color(CREAM_DIM));
                 ui.add_space(4.0);
-                let footer = 360.0;
+                let footer = 404.0;
                 let list_h = (ui.available_height() - footer).max(72.0);
                 ScrollArea::vertical()
                     .max_height(list_h)
@@ -147,6 +154,7 @@ impl MindMapApp {
                 if let Some(status) = status {
                     ui.label(RichText::new(status).size(11.0).color(YELLOW));
                 }
+                ui.label(RichText::new(sync_line).size(11.0).color(sync_color));
                 ui.label(
                     RichText::new(format!("Saved in {data_dir}"))
                         .size(10.5)
@@ -154,6 +162,9 @@ impl MindMapApp {
                 );
             });
 
+        if open_settings {
+            self.cloud.begin_edit();
+        }
         if create {
             self.create_canvas();
         } else if let Some(id) = open {

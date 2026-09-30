@@ -6,10 +6,15 @@ description = "A portable mind-mapping canvas"
 readme = "README.md"
 
 [dependencies]
+aes-gcm = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 egui = "0.29"
+hkdf = "0.12"
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Linux keeps the same window backends as before. Windows uses the same

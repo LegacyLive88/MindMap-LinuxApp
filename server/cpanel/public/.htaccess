@@ -1,0 +1,20 @@
+# Send every request on this domain to the PHP proxy.
+# Apache (behind the WHM nginx layer) reads this file.
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  # cPanel's Apache often drops Authorization before PHP sees it.
+  RewriteCond %{HTTP:Authorization} .
+  RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+  RewriteRule ^index\.php$ - [L]
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteRule ^ index.php [L]
+</IfModule>
+
+<IfModule mod_setenvif.c>
+  SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+</IfModule>
+CGIPassAuth On
+
+# Used when the host allows SetEnv. upstream.txt is the fallback.
+SetEnv MINDMAP_UPSTREAM http://127.0.0.1:3000
